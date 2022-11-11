@@ -6,14 +6,15 @@ import (
 	. "GPUMounter/pkg/util/log"
 	"context"
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
 	"github.com/julienschmidt/httprouter"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"net/http"
-	"strconv"
-	"strings"
 )
 
 func Index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -21,13 +22,18 @@ func Index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	fmt.Fprint(w, "This is gpu mounter api!\n")
 }
 
+// gpuNum是啥意思？几个？如果是要mount具体某个GPU呢？
 func AddGPU(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 	Logger.Info("access add gpu service")
+
+	//获取参数
 	podName := ps.ByName("pod")
 	namespace := ps.ByName("namespace")
 	gpuNum_str := ps.ByName("gpuNum")
 	isEntireMountStr := ps.ByName("isEntireMount")
 	Logger.Info("Pod: ", podName, " Namespace: ", namespace, " GPU Num: ", gpuNum_str, " Is entire mount: ", isEntireMountStr)
+
+	//GPU num是什么？
 	gpuNum, err := strconv.ParseInt(gpuNum_str, 10, 32)
 	if err != nil {
 		Logger.Error("Invalid param gpuNum: ", gpuNum_str)
@@ -42,6 +48,7 @@ func AddGPU(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		return
 	}
 
+	//获取K8s 交互的证书
 	clientset, err := config.GetClientSet()
 	if err != nil {
 		Logger.Error("Connect to k8s failed")
@@ -49,6 +56,8 @@ func AddGPU(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+
+	//获取ns下所有pod
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
@@ -87,6 +96,8 @@ func AddGPU(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		return
 	}
 	defer conn.Close()
+
+	//这里给Pod添加的GPU，GRPC告知worker去添加GPU
 	c := gpu_mount.NewAddGPUServiceClient(conn)
 	resp, err := c.AddGPU(context.TODO(), &gpu_mount.AddGPURequest{
 		PodName:       podName,
@@ -100,6 +111,8 @@ func AddGPU(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		http.Error(w, "Service Internal Error", 500)
 		return
 	}
+
+	//打印结果
 	switch resp.AddGpuResult {
 	case gpu_mount.AddGPUResponse_Success:
 		Logger.Info("Successfully add gpu for Pod: ", podName)
@@ -224,19 +237,29 @@ func RemoveGPU(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 	}
 }
 
+// master节点代码，从readme查看，是个http service，等待两个cmd，添加和删除GPU
 func main() {
+	//初始化log，这个log怎么man函数退出的时候sync。。？不过也对，退出的时候进行同步操作
 	InitLogger("/var/log/GPUMounter/", "GPUMounter-master.log")
 	defer Logger.Sync()
 
+	//创建http的service
 	router := httprouter.New()
+
+	//指定router的接口
 	router.GET("/", Index)
+	//gpuNum是啥意思？几个？如果是要mount具体某个GPU呢？
 	router.GET("/addgpu/namespace/:namespace/pod/:pod/gpu/:gpuNum/isEntireMount/:isEntireMount", AddGPU)
 	router.POST("/removegpu/namespace/:namespace/pod/:pod/force/:force", RemoveGPU)
+
+	//创建service
 	srv := &http.Server{
 		Handler: router,
 		Addr:    ":8080",
 	}
 	Logger.Info("Start gpu mounter master on " + srv.Addr)
+
+	//监听http请求
 	err := srv.ListenAndServe()
 	if err != nil {
 		Logger.Error("Failed to start gpu mounter master")
@@ -245,6 +268,7 @@ func main() {
 	}
 }
 
+// 从k8s集群中获取所有 label为gpu-mounter-worker节点的 pod
 func findAllWorker() (map[string]corev1.Pod, error) {
 	clientSet, err := config.GetClientSet()
 	if err != nil {
@@ -252,6 +276,8 @@ func findAllWorker() (map[string]corev1.Pod, error) {
 		Logger.Error(err.Error())
 		return nil, err
 	}
+
+	//通过k8s接口获取指定label的Pod
 	podList, err := clientSet.CoreV1().Pods("kube-system").List(context.TODO(), metav1.ListOptions{
 		LabelSelector: "app=gpu-mounter-worker",
 	})
@@ -259,6 +285,8 @@ func findAllWorker() (map[string]corev1.Pod, error) {
 		Logger.Error("Failed to gpu mounter worker")
 		return nil, err
 	}
+
+	//podCache
 	workerMap := make(map[string]corev1.Pod)
 	for _, worker := range podList.Items {
 		workerMap[worker.Spec.NodeName] = worker

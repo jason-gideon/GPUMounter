@@ -2,10 +2,11 @@ package config
 
 import (
 	"flag"
+	"sync"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"sync"
 )
 
 var clientset *kubernetes.Clientset
@@ -27,8 +28,11 @@ func GetKubeConfig(inCluster bool) (*rest.Config, error) {
 	}
 }
 
+// 封装了k8s 证书的方式
 func GetClientSet() (*kubernetes.Clientset, error) {
 	inCluster := true
+
+	//这里这个应该是sync 同步处理，
 	once.Do(func() {
 		config, err := GetKubeConfig(inCluster)
 		if err != nil {
